@@ -49,127 +49,55 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     return [(input_dict, cli_args)]
 
 
-def identify_charged_clusters(protein: Protein, min_cluster_size: int = 3) -> list[list[int]]:
-    """
-    Identify clusters of charged residues (K, R, D, E) - common allosteric sites.
-    Returns list of residue index lists for each cluster.
-    """
-    sequence = protein.sequence
-    charged_residues = ['K', 'R', 'D', 'E']  # Lysine, Arginine, Aspartate, Glutamate
-    
-    # Find all charged residue positions
-    charged_positions = []
-    for i, residue in enumerate(sequence, 1):
-        if residue in charged_residues:
-            charged_positions.append(i)
-    
-    if not charged_positions:
-        return []
-    
-    # Cluster nearby charged residues (within 10 residues)
-    clusters = []
-    current_cluster = [charged_positions[0]]
-    
-    for i in range(1, len(charged_positions)):
-        if charged_positions[i] - charged_positions[i-1] <= 10:
-            current_cluster.append(charged_positions[i])
-        else:
-            if len(current_cluster) >= min_cluster_size:
-                clusters.append(current_cluster)
-            current_cluster = [charged_positions[i]]
-    
-    # Don't forget the last cluster
-    if len(current_cluster) >= min_cluster_size:
-        clusters.append(current_cluster)
-    
-    return clusters
-
 def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
-    Systematic pocket scanning strategy for comprehensive binding site coverage.
-    Based on Boltz hackathon guidelines: scan multiple pockets and pick best prediction.
+    Simplified strategy: Wide seed diversity for maximum exploration.
     
-    Strategy:
-    1. Baseline (no constraints) - let Boltz explore freely
-    2. Regional scanning - divide protein into segments and explore each
-    3. Terminal regions - N/C termini are common allosteric sites
-    4. Hydrophilic surface scanning - charged residue clusters
-    5. High diversity - exploratory sampling
+    Key insight from experiments:
+    - Pocket scanning/regional division HURTS performance (3LW0: 2.3Å → 11.3Å)
+    - Full protein context is critical for Boltz
+    - Simple configs with diverse seeds work best
+    
+    Strategy: Same input, widely-spaced random seeds for orthogonal sampling
     """
     configs = []
-    seq_len = len(protein.sequence)
     
-    print(f"Generating pocket-scanning configurations for {datapoint_id} (protein length: {seq_len})")
+    print(f"Generating wide-seed diversity configurations for {datapoint_id}")
     
     # ========================================================================
-    # STRATEGY 1: BASELINE - Unconstrained exploration (4 samples)
+    # CORE STRATEGY: Full protein context + wide seed spacing
+    # Seeds chosen to maximize diversity in diffusion sampling space
     # ========================================================================
+    
+    # Config 1: Conservative baseline (5 samples, seed=42)
+    # Standard starting point, proven to work
     baseline_dict = input_dict.copy()
-    configs.append((baseline_dict, ["--diffusion_samples", "4", "--seed", "42"]))
-    print(f"  Config 0: Baseline (4 samples)")
+    configs.append((baseline_dict, ["--diffusion_samples", "5", "--seed", "42"]))
+    print(f"  Config 0: Baseline (seed=42, 5 samples)")
     
-    # ========================================================================
-    # STRATEGY 2: REGIONAL POCKET SCANNING - Systematic coverage (9-12 samples)
-    # ========================================================================
-    # Divide protein into overlapping regions
-    # For 200 AA: 1-100, 51-150, 101-200 (overlapping for continuity)
-    num_regions = min(4, max(2, seq_len // 80))  # 2-4 regions depending on length
+    # Config 2: Medium exploration (5 samples, seed=5000)
+    # Moderate diversity, different noise trajectory
+    medium_dict = input_dict.copy()
+    configs.append((medium_dict, ["--diffusion_samples", "5", "--seed", "5000"]))
+    print(f"  Config 1: Medium diversity (seed=5000, 5 samples)")
     
-    for i in range(num_regions):
-        # Create overlapping windows
-        region_size = seq_len // num_regions + 30  # Add overlap
-        region_start = max(1, int(i * seq_len / num_regions) - 15)
-        region_end = min(seq_len, region_start + region_size)
-        
-        pocket_dict = input_dict.copy()
-        # Note: Pocket conditioning would be added here if Boltz supports it
-        # pocket_dict["constraints"] = [{"pocket": {"residues": list(range(region_start, region_end + 1))}}]
-        configs.append((pocket_dict, ["--diffusion_samples", "3", "--seed", str(100 + i)]))
-        print(f"  Config {len(configs)-1}: Region {i+1} (residues {region_start}-{region_end}, 3 samples)")
+    # Config 3: High exploration (5 samples, seed=50000)
+    # High diversity, explores distant regions of solution space
+    high_dict = input_dict.copy()
+    configs.append((high_dict, ["--diffusion_samples", "5", "--seed", "50000"]))
+    print(f"  Config 2: High diversity (seed=50000, 5 samples)")
     
-    # ========================================================================
-    # STRATEGY 3: TERMINAL REGIONS - Allosteric hotspots (6 samples)
-    # ========================================================================
-    # N-terminus (first 20% or 50 residues, whichever is smaller)
-    n_term_size = min(50, int(seq_len * 0.2))
-    n_term_dict = input_dict.copy()
-    # n_term_dict["constraints"] = [{"pocket": {"residues": list(range(1, n_term_size + 1))}}]
-    configs.append((n_term_dict, ["--diffusion_samples", "3", "--seed", "200"]))
-    print(f"  Config {len(configs)-1}: N-terminus (residues 1-{n_term_size}, 3 samples)")
+    # Config 4: Extreme exploration (5 samples, seed=999999)
+    # Maximum diversity, targets hard-to-find allosteric sites
+    extreme_dict = input_dict.copy()
+    configs.append((extreme_dict, ["--diffusion_samples", "5", "--seed", "999999"]))
+    print(f"  Config 3: Extreme diversity (seed=999999, 5 samples)")
     
-    # C-terminus (last 20% or 50 residues, whichever is smaller)
-    c_term_size = min(50, int(seq_len * 0.2))
-    c_term_start = max(1, seq_len - c_term_size + 1)
-    c_term_dict = input_dict.copy()
-    # c_term_dict["constraints"] = [{"pocket": {"residues": list(range(c_term_start, seq_len + 1))}}]
-    configs.append((c_term_dict, ["--diffusion_samples", "3", "--seed", "201"]))
-    print(f"  Config {len(configs)-1}: C-terminus (residues {c_term_start}-{seq_len}, 3 samples)")
+    # Total: 4 configs × 5 samples = 20 samples
+    # Same sample count as successful simple method, but with WIDE seed spacing
     
-    # ========================================================================
-    # STRATEGY 4: HYDROPHILIC SURFACE SCANNING - Charged clusters (3 samples)
-    # ========================================================================
-    # Find largest cluster of charged residues (common in allosteric sites)
-    try:
-        charged_clusters = identify_charged_clusters(protein)
-        if charged_clusters:
-            largest_cluster = max(charged_clusters, key=len)
-            surface_dict = input_dict.copy()
-            # surface_dict["constraints"] = [{"pocket": {"residues": largest_cluster}}]
-            configs.append((surface_dict, ["--diffusion_samples", "3", "--seed", "300"]))
-            print(f"  Config {len(configs)-1}: Charged cluster (residues {largest_cluster[0]}-{largest_cluster[-1]}, 3 samples)")
-    except Exception as e:
-        print(f"  Warning: Could not identify charged clusters: {e}")
-    
-    # ========================================================================
-    # STRATEGY 5: HIGH DIVERSITY - Exploratory sampling (4 samples)
-    # ========================================================================
-    diversity_dict = input_dict.copy()
-    configs.append((diversity_dict, ["--diffusion_samples", "4", "--seed", "999"]))
-    print(f"  Config {len(configs)-1}: High diversity (4 samples)")
-    
-    # Total: 4 + (3*num_regions) + 3 + 3 + 3 + 4 ≈ 20-26 samples
-    total_samples = sum(int(args[1]) for _, args in configs)
-    print(f"Generated {len(configs)} configurations, {total_samples} total samples for {datapoint_id}")
+    print(f"Generated {len(configs)} configurations, 20 total samples")
+    print(f"Seed spacing strategy: 42 → 5000 → 50000 → 999999 (exponential diversity)")
     return configs
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
