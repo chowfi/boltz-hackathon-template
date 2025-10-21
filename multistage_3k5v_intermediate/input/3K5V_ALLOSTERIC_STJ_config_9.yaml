@@ -1,0 +1,55 @@
+version: 1
+sequences:
+- protein:
+    id: A
+    sequence: GAMDPSSPNYDKWEMERTDITMKHKLGGGQYGEVYEGVWKKYSLTVAVKTLKEDTMEVEEFLKEAAVMKEIKHPNLVQLLGVCTREPPFYIITEFMTYGNLLDYLRECNRQEVSAVVLLYMATQISSAMEYLEKKNFIHRDLAARNCLVGENHLVKVADFGLSRLMTGDTYTAHAGAKFPIKWTAPESLAYNKFSIKSDVWAFGVLLWEIATYGMSPYPGIDLSQVYELLEKDYRMERPEGCPEKVYELMRACWQWNPSDRPSFAEIHQAFETMFQESSISDEVEKELGKRGT
+    msa: hackathon_data/datasets/asos_public/msa/3K5V.csv
+- ligand:
+    id: B
+    smiles: c1cc(cc(c1)C(=O)N)c2cc(ncn2)Nc3ccc(cc3)OC(F)(F)F
+constraints:
+- pocket:
+    binder: B
+    contacts:
+    - - A
+      - 274
+    - - A
+      - 275
+    - - A
+      - 276
+    - - A
+      - 277
+    - - A
+      - 278
+    - - A
+      - 279
+    - - A
+      - 280
+    - - A
+      - 281
+    - - A
+      - 282
+    - - A
+      - 283
+    - - A
+      - 284
+    - - A
+      - 285
+    - - A
+      - 286
+    - - A
+      - 287
+    - - A
+      - 288
+    - - A
+      - 289
+    - - A
+      - 290
+    - - A
+      - 291
+    - - A
+      - 292
+    - - A
+      - 293
+    max_distance: 6.0
+    force: true
