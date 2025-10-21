@@ -51,92 +51,103 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
 
 def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
-    SATURATION + HARD Terminus Probing Strategy
+    General Heuristics + Regional Sampling Strategy
     
-    Key insights from testing:
-    - SATURATION works when diversity exists (6FVF: 15.68Å)
-    - SATURATION fails when Boltz is stuck in one region (3K5V: 25.5Å)
-    - 3K5V has N-terminus binding (seqid=1) which Boltz never explores
-    - Soft constraints (force=False) were completely ignored by Boltz
-    - Solution: HARD constraints (force=True) to guarantee terminus exploration
+    Key insight: Don't rely on ground truth seqid (PDB numbering issues!)
+    Instead: Sample likely allosteric regions based on general biology
     
     Strategy:
-    - 8 SATURATION configs (wide seed diversity, unconstrained)
-    - 1 N-terminus HARD probe (residues 1-20, force=True)
-    - 1 C-terminus HARD probe (last 20 residues, force=True)
+    - 3 SATURATION configs (pure exploration, 30% of samples)
+    - 6 REGIONAL configs (systematic coverage, 60% of samples)
+    - 1 HIGH DIVERSITY config (edge cases, 10% of samples)
+    
     Total: 10 configs × 5 samples = 50 total samples
     
-    Effect: 80% natural exploration, 10% forced N-term, 10% forced C-term
+    Why this works:
+    - No assumptions about seqid or PDB numbering
+    - Covers entire protein systematically
+    - Soft constraints (force=False) let Boltz refine
+    - Robust to metadata issues
     """
     configs = []
     
-    print(f"🔥 SATURATION + Terminus Probing for {datapoint_id}")
+    print(f"🔥 General Heuristics + Regional Sampling for {datapoint_id}")
     
     # Get ligand ID for constraints
     ligand_id = ligands[0].id if ligands else "B"
     protein_id = protein.id
     protein_length = len(protein.sequence)
     
-    # ========================================================================
-    # Config 0-7: SATURATION with wide seed diversity
-    # ========================================================================
-    seeds = [42, 1000, 5000, 10000, 50000, 100000, 500000, 7777777]
+    print(f"   Protein length: {protein_length} residues")
     
-    for i, seed in enumerate(seeds):
+    # ========================================================================
+    # Config 0-2: SATURATION (pure exploration, 30% of samples)
+    # ========================================================================
+    saturation_seeds = [42, 1000, 5000]
+    
+    for i, seed in enumerate(saturation_seeds):
         config_dict = input_dict.copy()
         configs.append((config_dict, ["--diffusion_samples", "5", "--seed", str(seed)]))
-        print(f"  Config {i}: Saturation seed={seed:>7} (5 samples)")
+        print(f"  Config {i}: SATURATION seed={seed:>5} (5 samples)")
     
     # ========================================================================
-    # Config 8: N-terminus Probing (residues 1-20)
-    # Targets hard cases like 3K5V where ligand binds at N-terminus
+    # Config 3-8: REGIONAL sampling (systematic coverage, 60% of samples)
+    # Divide protein into ~6 overlapping regions
     # ========================================================================
-    n_term_dict = input_dict.copy()
-    n_term_residues = list(range(1, min(21, protein_length + 1)))  # 1-indexed, residues 1-20
-    n_term_contacts = [[protein_id, res] for res in n_term_residues]
+    num_regions = 6
+    region_size = max(50, protein_length // 4)  # At least 50 residues, or 25% of protein
     
-    n_term_dict["constraints"] = [{
-        "pocket": {
-            "binder": ligand_id,
-            "contacts": n_term_contacts,
-            "max_distance": 6.0,  # Standard pocket distance
-            "force": True  # HARD constraint: Force exploration of N-terminus
-        }
-    }]
+    # Calculate region starts to cover the protein evenly
+    if protein_length <= region_size:
+        # Small protein - just sample the whole thing in one region
+        region_starts = [1]
+        num_regions = 1
+    else:
+        step = (protein_length - region_size) // (num_regions - 1) if num_regions > 1 else protein_length
+        step = max(step, 1)  # At least 1 residue step
+        region_starts = [1 + i * step for i in range(num_regions)]
     
-    configs.append((n_term_dict, ["--diffusion_samples", "5", "--seed", "111111"]))
-    print(f"  Config {len(configs)-1}: N-terminus HARD probe (residues 1-20, force=True, 5 samples)")
+    for i, start in enumerate(region_starts[:6]):  # Max 6 regions
+        end = min(start + region_size - 1, protein_length)
+        region_residues = list(range(start, end + 1))
+        
+        region_dict = input_dict.copy()
+        region_dict["constraints"] = [{
+            "pocket": {
+                "binder": ligand_id,
+                "contacts": [[protein_id, res] for res in region_residues],
+                "max_distance": 6.0,
+                "force": False  # SOFT constraint - let Boltz decide
+            }
+        }]
+        
+        config_idx = len(configs)
+        seed = 100000 + i
+        configs.append((region_dict, ["--diffusion_samples", "5", "--seed", str(seed)]))
+        print(f"  Config {config_idx}: REGION {i+1} residues {start:>3}-{end:>3} (soft, 5 samples)")
     
     # ========================================================================
-    # Config 9: C-terminus Probing (last 20 residues)
-    # Some allosteric sites are at C-terminus
+    # Config 9: HIGH DIVERSITY (edge cases, 10% of samples)
     # ========================================================================
-    c_term_dict = input_dict.copy()
-    c_term_start = max(1, protein_length - 19)  # Last 20 residues
-    c_term_residues = list(range(c_term_start, protein_length + 1))  # 1-indexed
-    c_term_contacts = [[protein_id, res] for res in c_term_residues]
+    high_div_dict = input_dict.copy()
+    configs.append((high_div_dict, ["--diffusion_samples", "5", "--seed", "7777777"]))
+    print(f"  Config {len(configs)-1}: HIGH DIVERSITY seed=7777777 (5 samples)")
     
-    c_term_dict["constraints"] = [{
-        "pocket": {
-            "binder": ligand_id,
-            "contacts": c_term_contacts,
-            "max_distance": 6.0,
-            "force": True  # HARD constraint: Force exploration of C-terminus
-        }
-    }]
-    
-    configs.append((c_term_dict, ["--diffusion_samples", "5", "--seed", "222222"]))
-    print(f"  Config {len(configs)-1}: C-terminus HARD probe (residues {c_term_start}-{protein_length}, force=True, 5 samples)")
+    # Pad with SATURATION if we have < 10 configs (for small proteins)
+    while len(configs) < 10:
+        extra_seed = 10000 * (len(configs) + 1)
+        configs.append((input_dict.copy(), ["--diffusion_samples", "5", "--seed", str(extra_seed)]))
+        print(f"  Config {len(configs)-1}: Extra SATURATION seed={extra_seed} (5 samples)")
     
     # ========================================================================
     # Total: 10 configs × 5 samples = 50 samples
-    # 8 unconstrained + 2 terminus-focused
     # ========================================================================
     
-    print(f"✅ Generated {len(configs)} configs, 50 TOTAL SAMPLES")
-    print(f"   - 8 SATURATION configs (seeds: 42 → 7,777,777, unconstrained)")
-    print(f"   - 1 N-terminus HARD probe (force=True, 3K5V-targeting)")
-    print(f"   - 1 C-terminus HARD probe (force=True, coverage)")
+    print(f"✅ Generated {len(configs)} configs, {len(configs)*5} TOTAL SAMPLES")
+    print(f"   - {len(saturation_seeds)} SATURATION configs (pure exploration)")
+    print(f"   - {min(num_regions, 6)} REGIONAL configs (systematic coverage)")
+    print(f"   - 1 HIGH DIVERSITY config (edge cases)")
+    print(f"   Strategy: Cover entire protein without assuming binding location")
     return configs
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
@@ -257,15 +268,14 @@ def normalize_scores_fast(scores: list[dict]) -> list[dict]:
 
 def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
     """
-    SATURATION + Multi-Stage Ranking
+    Simple Confidence-Only Ranking
     
-    Strategy:
-    1. Score all samples by confidence
-    2. Separate terminus configs (8, 9) from others
-    3. Ensure at least 2 terminus samples in Top-5 (for diversity)
-    4. Fill remaining with highest confidence from other configs
+    After testing:
+    - Multi-stage ranking didn't help (targeted wrong locations due to PDB numbering)
+    - Complex scoring often picks physically "better" but spatially wrong predictions
+    - Simple confidence ranking is robust and works well
     
-    Why: Terminus samples might have lower confidence but explore correct pockets
+    Strategy: Sort all samples by Boltz confidence, return top 5
     """
     # Collect all PDBs from all configurations
     all_pdbs = []
@@ -277,7 +287,7 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No PDB files found for {datapoint.datapoint_id}")
         return []
     
-    print(f"🔥 SATURATION + Multi-Stage Ranking: {len(all_pdbs)} predictions for {datapoint.datapoint_id}")
+    print(f"🔥 Confidence-Only Ranking: {len(all_pdbs)} predictions for {datapoint.datapoint_id}")
     
     scores = []
     for pdb_path in all_pdbs:
@@ -285,13 +295,9 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
             # Extract Boltz confidence (raw, no normalization)
             boltz_conf = extract_confidence(pdb_path)
             
-            # Determine if this is a terminus config (config 8 or 9)
-            is_terminus = "config_8_" in pdb_path.name or "config_9_" in pdb_path.name
-            
             scores.append({
                 "path": pdb_path,
                 "confidence": boltz_conf,
-                "is_terminus": is_terminus,
             })
         except Exception as e:
             print(f"Warning: Failed to score {pdb_path.name}: {e}")
@@ -301,55 +307,20 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No valid scores computed for {datapoint.datapoint_id}")
         return all_pdbs[:5]
     
-    # Separate terminus and non-terminus samples
-    terminus_samples = [s for s in scores if s["is_terminus"]]
-    other_samples = [s for s in scores if not s["is_terminus"]]
+    # Sort by raw confidence (highest first)
+    scores.sort(key=lambda x: x["confidence"], reverse=True)
     
-    # Sort each pool by confidence
-    terminus_samples.sort(key=lambda x: x["confidence"], reverse=True)
-    other_samples.sort(key=lambda x: x["confidence"], reverse=True)
-    
-    # DEBUG: Print all terminus samples
-    print(f"\n🔍 TERMINUS SAMPLES (Config 8 & 9): {len(terminus_samples)} total")
+    # Print top 10 for debugging
+    print(f"\n🔍 TOP 10 BY CONFIDENCE:")
     print(f"{'Rank':<5} {'Model':<40} {'Confidence':<12}")
     print("-" * 60)
-    for i, s in enumerate(terminus_samples[:10], 1):
+    for i, s in enumerate(scores[:10], 1):
         model_name = s["path"].name[-35:]
         print(f"{i:<5} {model_name:<40} {s['confidence']:.4f}")
     
-    print(f"\n🔍 TOP NON-TERMINUS SAMPLES: {len(other_samples)} total")
-    print(f"{'Rank':<5} {'Model':<40} {'Confidence':<12}")
-    print("-" * 60)
-    for i, s in enumerate(other_samples[:10], 1):
-        model_name = s["path"].name[-35:]
-        print(f"{i:<5} {model_name:<40} {s['confidence']:.4f}")
+    print(f"\n✅ Selected Top-5 (confidence range: {scores[0]['confidence']:.2f} - {scores[4]['confidence']:.2f})")
     
-    # Multi-stage ranking: Ensure diversity
-    final_ranking = []
-    
-    # Strategy: Take best 2 from terminus (if they exist), rest from others
-    if len(terminus_samples) >= 2:
-        final_ranking.extend(terminus_samples[:2])
-        final_ranking.extend(other_samples[:3])
-        print(f"\n✅ Multi-Stage: 2 terminus + 3 other samples")
-    elif len(terminus_samples) == 1:
-        final_ranking.extend(terminus_samples[:1])
-        final_ranking.extend(other_samples[:4])
-        print(f"\n✅ Multi-Stage: 1 terminus + 4 other samples")
-    else:
-        # No terminus samples - just use top 5 by confidence
-        final_ranking.extend(other_samples[:5])
-        print(f"\n⚠️  No terminus samples found - using top 5 by confidence")
-    
-    # Re-sort final ranking by confidence (for Top-1 selection)
-    final_ranking.sort(key=lambda x: x["confidence"], reverse=True)
-    
-    print(f"\n✅ FINAL TOP-5:")
-    for i, s in enumerate(final_ranking[:5], 1):
-        marker = "🎯 TERMINUS" if s["is_terminus"] else "       "
-        print(f"  {i}. {marker} Confidence: {s['confidence']:.4f} - {s['path'].name}")
-    
-    return [s["path"] for s in final_ranking[:5]]
+    return [s["path"] for s in scores[:5]]
 
 
 # -----------------------------------------------------------------------------
