@@ -257,15 +257,15 @@ def normalize_scores_fast(scores: list[dict]) -> list[dict]:
 
 def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
     """
-    SATURATION + Confidence-Only Scoring
+    SATURATION + Multi-Stage Ranking
     
-    Key insight from debugging 6FVF:
-    - All models have similar confidence (~97.5)
-    - All models have IDENTICAL clashes (2866)
-    - Normalization destroys the small confidence differences
-    - More contacts ≠ better (model_0 had most contacts but worst RMSD)
+    Strategy:
+    1. Score all samples by confidence
+    2. Separate terminus configs (8, 9) from others
+    3. Ensure at least 2 terminus samples in Top-5 (for diversity)
+    4. Fill remaining with highest confidence from other configs
     
-    Solution: Sort by raw Boltz confidence (trust the model's subtle preferences)
+    Why: Terminus samples might have lower confidence but explore correct pockets
     """
     # Collect all PDBs from all configurations
     all_pdbs = []
@@ -277,7 +277,7 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No PDB files found for {datapoint.datapoint_id}")
         return []
     
-    print(f"🔥 SATURATION + Confidence ranking: {len(all_pdbs)} predictions for {datapoint.datapoint_id}")
+    print(f"🔥 SATURATION + Multi-Stage Ranking: {len(all_pdbs)} predictions for {datapoint.datapoint_id}")
     
     scores = []
     for pdb_path in all_pdbs:
@@ -285,9 +285,13 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
             # Extract Boltz confidence (raw, no normalization)
             boltz_conf = extract_confidence(pdb_path)
             
+            # Determine if this is a terminus config (config 8 or 9)
+            is_terminus = "config_8_" in pdb_path.name or "config_9_" in pdb_path.name
+            
             scores.append({
                 "path": pdb_path,
                 "confidence": boltz_conf,
+                "is_terminus": is_terminus,
             })
         except Exception as e:
             print(f"Warning: Failed to score {pdb_path.name}: {e}")
@@ -297,21 +301,55 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No valid scores computed for {datapoint.datapoint_id}")
         return all_pdbs[:5]
     
-    # Sort by raw confidence (highest first)
-    scores.sort(key=lambda x: x["confidence"], reverse=True)
+    # Separate terminus and non-terminus samples
+    terminus_samples = [s for s in scores if s["is_terminus"]]
+    other_samples = [s for s in scores if not s["is_terminus"]]
     
-    # Print top 10 for debugging
-    print(f"\n🔍 TOP 10 BY CONFIDENCE:")
-    print(f"{'Rank':<5} {'Model':<35} {'Confidence':<12}")
-    print("-" * 55)
-    for i, s in enumerate(scores[:10], 1):
-        model_name = s["path"].name[-30:]  # Last 30 chars of filename
-        print(f"{i:<5} {model_name:<35} {s['confidence']:.4f}")
+    # Sort each pool by confidence
+    terminus_samples.sort(key=lambda x: x["confidence"], reverse=True)
+    other_samples.sort(key=lambda x: x["confidence"], reverse=True)
     
-    print(f"\n✅ Selected Top-1: {scores[0]['path'].name}")
-    print(f"   Confidence: {scores[0]['confidence']:.4f}")
+    # DEBUG: Print all terminus samples
+    print(f"\n🔍 TERMINUS SAMPLES (Config 8 & 9): {len(terminus_samples)} total")
+    print(f"{'Rank':<5} {'Model':<40} {'Confidence':<12}")
+    print("-" * 60)
+    for i, s in enumerate(terminus_samples[:10], 1):
+        model_name = s["path"].name[-35:]
+        print(f"{i:<5} {model_name:<40} {s['confidence']:.4f}")
     
-    return [s["path"] for s in scores[:5]]
+    print(f"\n🔍 TOP NON-TERMINUS SAMPLES: {len(other_samples)} total")
+    print(f"{'Rank':<5} {'Model':<40} {'Confidence':<12}")
+    print("-" * 60)
+    for i, s in enumerate(other_samples[:10], 1):
+        model_name = s["path"].name[-35:]
+        print(f"{i:<5} {model_name:<40} {s['confidence']:.4f}")
+    
+    # Multi-stage ranking: Ensure diversity
+    final_ranking = []
+    
+    # Strategy: Take best 2 from terminus (if they exist), rest from others
+    if len(terminus_samples) >= 2:
+        final_ranking.extend(terminus_samples[:2])
+        final_ranking.extend(other_samples[:3])
+        print(f"\n✅ Multi-Stage: 2 terminus + 3 other samples")
+    elif len(terminus_samples) == 1:
+        final_ranking.extend(terminus_samples[:1])
+        final_ranking.extend(other_samples[:4])
+        print(f"\n✅ Multi-Stage: 1 terminus + 4 other samples")
+    else:
+        # No terminus samples - just use top 5 by confidence
+        final_ranking.extend(other_samples[:5])
+        print(f"\n⚠️  No terminus samples found - using top 5 by confidence")
+    
+    # Re-sort final ranking by confidence (for Top-1 selection)
+    final_ranking.sort(key=lambda x: x["confidence"], reverse=True)
+    
+    print(f"\n✅ FINAL TOP-5:")
+    for i, s in enumerate(final_ranking[:5], 1):
+        marker = "🎯 TERMINUS" if s["is_terminus"] else "       "
+        print(f"  {i}. {marker} Confidence: {s['confidence']:.4f} - {s['path'].name}")
+    
+    return [s["path"] for s in final_ranking[:5]]
 
 
 # -----------------------------------------------------------------------------
