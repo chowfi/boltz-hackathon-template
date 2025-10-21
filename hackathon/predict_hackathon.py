@@ -104,6 +104,57 @@ def identify_sequence_pockets(protein: Protein, n_pockets: int = 3) -> list[list
     
     return pockets[:n_pockets]
 
+def identify_geometric_pockets(protein: Protein, n_pockets: int = 3) -> list[list[int]]:
+    """
+    Geometric pocket identification based on surface accessibility.
+    Strategy: Find surface residues with high accessibility scores.
+    """
+    sequence = protein.sequence
+    seq_len = len(sequence)
+    
+    # Calculate accessibility scores for each residue
+    accessibility_scores = []
+    for i, residue in enumerate(sequence, 1):
+        # Use Kyte-Doolittle scale (inverted for accessibility)
+        kd_score = compute_kyte_doolittle_score(residue)
+        # Higher score = more accessible (surface-exposed)
+        accessibility_scores.append((i, kd_score))
+    
+    # Sort by accessibility (highest first)
+    accessibility_scores.sort(key=lambda x: x[1], reverse=True)
+    
+    # Select top accessible residues as pocket centers
+    pockets = []
+    used_residues = set()
+    
+    for residue_idx, score in accessibility_scores:
+        if residue_idx in used_residues:
+            continue
+            
+        # Create pocket around this residue
+        pocket = []
+        for offset in range(-2, 3):  # ±2 residues around center
+            neighbor_idx = residue_idx + offset
+            if 1 <= neighbor_idx <= seq_len and neighbor_idx not in used_residues:
+                pocket.append(neighbor_idx)
+                used_residues.add(neighbor_idx)
+        
+        if pocket:
+            pockets.append(pocket[:3])  # Take first 3 residues
+        
+        if len(pockets) >= n_pockets:
+            break
+    
+    # Ensure we have at least n_pockets
+    while len(pockets) < n_pockets:
+        # Add random middle regions if needed
+        mid_point = seq_len // 2
+        start = max(1, mid_point - 1)
+        end = min(seq_len, mid_point + 1)
+        pockets.append(list(range(start, end + 1)))
+    
+    return pockets[:n_pockets]
+
 def compute_kyte_doolittle_score(residue: str) -> float:
     """
     Fast hydrophobicity scoring for accessibility.
@@ -139,9 +190,17 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     configs.append((repulsion_dict, ["--diffusion_samples", "4", "--seed", "123"]))
     
     # Configs 3-5: Pocket scanning (3 configs × 3 samples each = 9 samples)
-    # Use sequence-based heuristics for faster iteration
+    # A/B Test: Try geometric approach for comparison
+    use_geometric = True  # Set to False to use sequence-based approach
+    
     try:
-        pocket_residues_list = identify_sequence_pockets(protein, n_pockets=3)
+        if use_geometric:
+            print(f"Using geometric pocket identification for {datapoint_id}")
+            pocket_residues_list = identify_geometric_pockets(protein, n_pockets=3)
+        else:
+            print(f"Using sequence-based pocket identification for {datapoint_id}")
+            pocket_residues_list = identify_sequence_pockets(protein, n_pockets=3)
+            
         for i, pocket_residues in enumerate(pocket_residues_list):
             pocket_dict = input_dict.copy()
             # Add contact constraints to candidate pocket residues
