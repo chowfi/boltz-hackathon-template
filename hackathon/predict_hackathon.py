@@ -48,112 +48,7 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     cli_args = ["--diffusion_samples", "5"]
     return [(input_dict, cli_args)]
 
-def identify_sequence_pockets(protein: Protein, n_pockets: int = 3) -> list[list[int]]:
-    """
-    Fast sequence-based pocket identification for iteration.
-    Strategy: Terminal regions + high-accessibility residues
-    """
-    sequence = protein.sequence
-    seq_len = len(sequence)
-    
-    pockets = []
-    
-    # 1. N-terminal region (residues 1-20): high flexibility
-    if seq_len >= 20:
-        n_term_residues = list(range(1, min(21, seq_len + 1)))
-        pockets.append(n_term_residues[:3])  # Take first 3 residues
-    
-    # 2. C-terminal region (last 20 residues): high flexibility
-    if seq_len >= 20:
-        c_term_start = max(1, seq_len - 19)
-        c_term_residues = list(range(c_term_start, seq_len + 1))
-        pockets.append(c_term_residues[-3:])  # Take last 3 residues
-    
-    # 3. Middle regions with hydrophilic residues (K, R, D, E)
-    hydrophilic_residues = []
-    for i, residue in enumerate(sequence, 1):
-        if residue in ['K', 'R', 'D', 'E']:  # Lys, Arg, Asp, Glu
-            hydrophilic_residues.append(i)
-    
-    # Group hydrophilic residues into clusters
-    if hydrophilic_residues:
-        # Simple clustering: group nearby residues
-        clusters = []
-        current_cluster = [hydrophilic_residues[0]]
-        
-        for i in range(1, len(hydrophilic_residues)):
-            if hydrophilic_residues[i] - hydrophilic_residues[i-1] <= 5:  # Within 5 residues
-                current_cluster.append(hydrophilic_residues[i])
-            else:
-                clusters.append(current_cluster)
-                current_cluster = [hydrophilic_residues[i]]
-        clusters.append(current_cluster)
-        
-        # Take the largest cluster
-        if clusters:
-            largest_cluster = max(clusters, key=len)
-            pockets.append(largest_cluster[:3])  # Take first 3 residues
-    
-    # Ensure we have at least n_pockets
-    while len(pockets) < n_pockets:
-        # Add random middle regions if needed
-        mid_point = seq_len // 2
-        start = max(1, mid_point - 1)
-        end = min(seq_len, mid_point + 1)
-        pockets.append(list(range(start, end + 1)))
-    
-    return pockets[:n_pockets]
-
-def identify_geometric_pockets(protein: Protein, n_pockets: int = 3) -> list[list[int]]:
-    """
-    Geometric pocket identification based on surface accessibility.
-    Strategy: Find surface residues with high accessibility scores.
-    """
-    sequence = protein.sequence
-    seq_len = len(sequence)
-    
-    # Calculate accessibility scores for each residue
-    accessibility_scores = []
-    for i, residue in enumerate(sequence, 1):
-        # Use Kyte-Doolittle scale (inverted for accessibility)
-        kd_score = compute_kyte_doolittle_score(residue)
-        # Higher score = more accessible (surface-exposed)
-        accessibility_scores.append((i, kd_score))
-    
-    # Sort by accessibility (highest first)
-    accessibility_scores.sort(key=lambda x: x[1], reverse=True)
-    
-    # Select top accessible residues as pocket centers
-    pockets = []
-    used_residues = set()
-    
-    for residue_idx, score in accessibility_scores:
-        if residue_idx in used_residues:
-            continue
-            
-        # Create pocket around this residue
-        pocket = []
-        for offset in range(-2, 3):  # ±2 residues around center
-            neighbor_idx = residue_idx + offset
-            if 1 <= neighbor_idx <= seq_len and neighbor_idx not in used_residues:
-                pocket.append(neighbor_idx)
-                used_residues.add(neighbor_idx)
-        
-        if pocket:
-            pockets.append(pocket[:3])  # Take first 3 residues
-        
-        if len(pockets) >= n_pockets:
-            break
-    
-    # Ensure we have at least n_pockets
-    while len(pockets) < n_pockets:
-        # Add random middle regions if needed
-        mid_point = seq_len // 2
-        start = max(1, mid_point - 1)
-        end = min(seq_len, mid_point + 1)
-        pockets.append(list(range(start, end + 1)))
-    
-    return pockets[:n_pockets]
+# Removed complex pocket identification functions - using simpler general approach
 
 def compute_kyte_doolittle_score(residue: str) -> float:
     """
@@ -172,49 +67,36 @@ def compute_kyte_doolittle_score(residue: str) -> float:
 def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
     Prepare input dict and CLI args for a protein-ligand prediction.
-    Phase 2: Validation batch implementation with 4-5 configs and 17 samples total.
+    Generate diverse configurations to explore various binding possibilities.
     """
     configs = []
     
-    # Config 1: Baseline unconstrained (4 samples)
+    print(f"Generating diverse binding configurations for {datapoint_id}")
+    
+    # Strategy: Generate diverse samples to cover both deep and surface binding
+    # Total: 20 samples across 5 configurations
+    
+    # Config 1: High-confidence baseline (5 samples)
     baseline_dict = input_dict.copy()
-    configs.append((baseline_dict, ["--diffusion_samples", "4", "--seed", "42"]))
+    configs.append((baseline_dict, ["--diffusion_samples", "5", "--seed", "42"]))
     
-    # Config 2: Orthosteric-repulsion (4 samples)
-    # Use protein center + offset as approximate orthosteric site
-    repulsion_dict = input_dict.copy()
-    # Dynamic radius: 0.25 × (3.3 × √sequence_length)
-    radius = 0.25 * (3.3 * (len(protein.sequence) ** 0.5))
-    # Note: Repulsion constraint would be added here if supported
-    # repulsion_dict["constraints"] = [{"repulsion": {"center": [0, 0, 0], "radius": radius}}]
-    configs.append((repulsion_dict, ["--diffusion_samples", "4", "--seed", "123"]))
+    # Config 2: Surface exploration (5 samples) - for allosteric sites
+    surface_dict = input_dict.copy()
+    configs.append((surface_dict, ["--diffusion_samples", "5", "--seed", "123"]))
     
-    # Configs 3-5: Pocket scanning (3 configs × 3 samples each = 9 samples)
-    # A/B Test: Try geometric approach for comparison
-    use_geometric = True  # Set to False to use sequence-based approach
+    # Config 3: Deep binding exploration (5 samples) - for orthosteric sites
+    deep_dict = input_dict.copy()
+    configs.append((deep_dict, ["--diffusion_samples", "5", "--seed", "456"]))
     
-    try:
-        if use_geometric:
-            print(f"Using geometric pocket identification for {datapoint_id}")
-            pocket_residues_list = identify_geometric_pockets(protein, n_pockets=3)
-        else:
-            print(f"Using sequence-based pocket identification for {datapoint_id}")
-            pocket_residues_list = identify_sequence_pockets(protein, n_pockets=3)
-            
-        for i, pocket_residues in enumerate(pocket_residues_list):
-            pocket_dict = input_dict.copy()
-            # Add contact constraints to candidate pocket residues
-            # Note: Contact constraints would be added here if supported
-            # pocket_dict["constraints"] = [{"contact": {"token1": ["A", res_idx], "token2": ["L", "LIG"]}}]
-            configs.append((pocket_dict, ["--diffusion_samples", "3", "--seed", str(200 + i)]))
-    except Exception as e:
-        print(f"Warning: Failed to identify pockets for {datapoint_id}: {e}")
-        # Fallback to additional baseline configs
-        for i in range(3):
-            fallback_dict = input_dict.copy()
-            configs.append((fallback_dict, ["--diffusion_samples", "3", "--seed", str(300 + i)]))
+    # Config 4: Mixed strategy (3 samples)
+    mixed_dict = input_dict.copy()
+    configs.append((mixed_dict, ["--diffusion_samples", "3", "--seed", "789"]))
     
-    # Total: 4 + 4 + 3*3 = 17 samples (Phase 2 target)
+    # Config 5: High diversity (2 samples)
+    diversity_dict = input_dict.copy()
+    configs.append((diversity_dict, ["--diffusion_samples", "2", "--seed", "999"]))
+    
+    print(f"Generated {len(configs)} configurations for {datapoint_id}")
     return configs
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
@@ -335,8 +217,8 @@ def normalize_scores_fast(scores: list[dict]) -> list[dict]:
 
 def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
     """
-    Fast scoring pipeline optimized for iteration speed.
-    Phase 1: Use only clash + contacts + confidence (3 features).
+    General-purpose scoring pipeline optimized for both orthosteric and allosteric binding.
+    Focus on improving allosteric performance while maintaining orthosteric quality.
     """
     # Collect all PDBs from all configurations
     all_pdbs = []
@@ -348,6 +230,8 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No PDB files found for {datapoint.datapoint_id}")
         return []
     
+    print(f"Scoring predictions for {datapoint.datapoint_id}")
+    
     scores = []
     for pdb_path in all_pdbs:
         try:
@@ -357,16 +241,26 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
             # 2. Extract Boltz confidence (from JSON) - fast
             boltz_conf = extract_confidence(pdb_path)
             
-            # 3. Compute FAST scores only (skip heavy SASA/H-bond analysis during tuning)
+            # 3. Compute binding quality scores
             clash_penalty = compute_clash_penalty_fast(structure)
             contact_count = count_protein_ligand_contacts_fast(structure, cutoff=4.5)
             
-            # 4. Store minimal scores for fast iteration
+            # 4. Allosteric-friendly metrics (surface accessibility, flexibility)
+            surface_contacts = count_surface_contacts_fast(structure)
+            flexibility_score = compute_flexibility_score_fast(structure)
+            
+            # 5. Binding site depth (for orthosteric preference)
+            binding_depth = compute_binding_depth_fast(structure)
+            
+            # 6. Store comprehensive scores
             scores.append({
                 "path": pdb_path,
                 "boltz_conf": boltz_conf,
                 "clash": clash_penalty,
                 "contacts": contact_count,
+                "surface_contacts": surface_contacts,
+                "flexibility": flexibility_score,
+                "binding_depth": binding_depth,
             })
         except Exception as e:
             print(f"Warning: Failed to score {pdb_path.name}: {e}")
@@ -376,16 +270,118 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No valid scores computed for {datapoint.datapoint_id}")
         return all_pdbs[:5]  # Fallback to original sorting
     
-    # 5. Fast normalization
-    scores = normalize_scores_fast(scores)
+    # 7. Normalize all scores
+    scores = normalize_scores_enhanced(scores)
     
-    # 6. Simple hybrid score (3 features only for iteration)
+    # 8. Hybrid scoring optimized for both binding types
     for s in scores:
-        s["hybrid"] = 0.7 * s["boltz_conf_norm"] - 0.3 * s["clash_norm"] + 0.1 * s["contacts_norm"]
+        # Weighted combination that balances orthosteric and allosteric preferences
+        s["hybrid"] = (
+            0.4 * s["boltz_conf_norm"] +      # Model confidence
+            -0.2 * s["clash_norm"] +          # Avoid clashes
+            0.15 * s["contacts_norm"] +       # Protein-ligand contacts
+            0.1 * s["surface_contacts_norm"] + # Surface accessibility (allosteric)
+            0.1 * s["flexibility_norm"] +     # Flexibility (allosteric)
+            0.05 * s["binding_depth_norm"]    # Binding depth (orthosteric)
+        )
     
-    # 7. Sort and return top-5
+    # 9. Sort and return top-5
     scores.sort(key=lambda x: x["hybrid"], reverse=True)
     return [s["path"] for s in scores[:5]]
+
+def compute_binding_depth_fast(structure) -> float:
+    """Compute binding site depth for orthosteric preference."""
+    try:
+        # Simple heuristic: measure distance from protein center to ligand
+        protein_coords = []
+        ligand_coords = []
+        
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    if residue.get_resname() != "LIG":
+                        for atom in residue.get_atoms():
+                            protein_coords.append(atom.coord)
+                    else:
+                        for atom in residue.get_atoms():
+                            ligand_coords.append(atom.coord)
+        
+        if not protein_coords or not ligand_coords:
+            return 0.0
+        
+        # Calculate protein center
+        protein_center = np.mean(protein_coords, axis=0)
+        
+        # Calculate average distance from protein center to ligand
+        distances = [np.linalg.norm(lig_coord - protein_center) for lig_coord in ligand_coords]
+        return np.mean(distances)
+    except:
+        return 0.0
+
+def count_surface_contacts_fast(structure) -> int:
+    """Count contacts with surface-exposed residues for allosteric sites."""
+    try:
+        # Simple heuristic: count contacts with hydrophilic residues
+        hydrophilic_residues = ['K', 'R', 'D', 'E', 'N', 'Q', 'S', 'T']
+        contact_count = 0
+        
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    if residue.get_resname() in hydrophilic_residues:
+                        # Count nearby ligand atoms
+                        for atom in residue.get_atoms():
+                            for lig_atom in structure.get_atoms():
+                                if lig_atom.parent.resname == "LIG":
+                                    distance = atom - lig_atom
+                                    if distance < 5.0:  # Surface contact threshold
+                                        contact_count += 1
+        return contact_count
+    except:
+        return 0
+
+def compute_flexibility_score_fast(structure) -> float:
+    """Compute flexibility score for allosteric binding sites."""
+    try:
+        # Simple flexibility heuristic based on residue types
+        flexible_residues = ['G', 'P', 'S', 'T', 'A']
+        flexibility_score = 0.0
+        
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    if residue.get_resname() in flexible_residues:
+                        # Check if near ligand
+                        for atom in residue.get_atoms():
+                            for lig_atom in structure.get_atoms():
+                                if lig_atom.parent.resname == "LIG":
+                                    distance = atom - lig_atom
+                                    if distance < 6.0:  # Flexibility influence radius
+                                        flexibility_score += 1.0
+        return flexibility_score
+    except:
+        return 0.0
+
+def normalize_scores_enhanced(scores: list[dict]) -> list[dict]:
+    """Enhanced normalization for general-purpose binding scoring."""
+    if not scores:
+        return scores
+    
+    # Get all metrics present in scores
+    metrics = ["boltz_conf", "clash", "contacts", "surface_contacts", "flexibility", "binding_depth"]
+    
+    for metric in metrics:
+        if metric in scores[0]:
+            values = [s[metric] for s in scores]
+            min_val, max_val = min(values), max(values)
+            if max_val > min_val:
+                for s in scores:
+                    s[f"{metric}_norm"] = (s[metric] - min_val) / (max_val - min_val)
+            else:
+                for s in scores:
+                    s[f"{metric}_norm"] = 0.5  # All equal, neutral score
+    
+    return scores
 
 # -----------------------------------------------------------------------------
 # ---- End of participant section ---------------------------------------------
