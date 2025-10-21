@@ -51,19 +51,22 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
 
 def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
-    SATURATION + N-terminus Probing Strategy
+    SATURATION + HARD Terminus Probing Strategy
     
     Key insights from testing:
     - SATURATION works when diversity exists (6FVF: 15.68Å)
     - SATURATION fails when Boltz is stuck in one region (3K5V: 25.5Å)
     - 3K5V has N-terminus binding (seqid=1) which Boltz never explores
-    - Solution: Add explicit N-terminus/C-terminus probing configs
+    - Soft constraints (force=False) were completely ignored by Boltz
+    - Solution: HARD constraints (force=True) to guarantee terminus exploration
     
     Strategy:
-    - 8 SATURATION configs (wide seed diversity)
-    - 1 N-terminus probing config (residues 1-20)
-    - 1 C-terminus probing config (last 20 residues)
+    - 8 SATURATION configs (wide seed diversity, unconstrained)
+    - 1 N-terminus HARD probe (residues 1-20, force=True)
+    - 1 C-terminus HARD probe (last 20 residues, force=True)
     Total: 10 configs × 5 samples = 50 total samples
+    
+    Effect: 80% natural exploration, 10% forced N-term, 10% forced C-term
     """
     configs = []
     
@@ -97,12 +100,12 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
             "binder": ligand_id,
             "contacts": n_term_contacts,
             "max_distance": 6.0,  # Standard pocket distance
-            "force": False  # Use as soft constraint (conditioning)
+            "force": True  # HARD constraint: Force exploration of N-terminus
         }
     }]
     
     configs.append((n_term_dict, ["--diffusion_samples", "5", "--seed", "111111"]))
-    print(f"  Config {len(configs)-1}: N-terminus probe (residues 1-20, 5 samples)")
+    print(f"  Config {len(configs)-1}: N-terminus HARD probe (residues 1-20, force=True, 5 samples)")
     
     # ========================================================================
     # Config 9: C-terminus Probing (last 20 residues)
@@ -118,12 +121,12 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
             "binder": ligand_id,
             "contacts": c_term_contacts,
             "max_distance": 6.0,
-            "force": False
+            "force": True  # HARD constraint: Force exploration of C-terminus
         }
     }]
     
     configs.append((c_term_dict, ["--diffusion_samples", "5", "--seed", "222222"]))
-    print(f"  Config {len(configs)-1}: C-terminus probe (residues {c_term_start}-{protein_length}, 5 samples)")
+    print(f"  Config {len(configs)-1}: C-terminus HARD probe (residues {c_term_start}-{protein_length}, force=True, 5 samples)")
     
     # ========================================================================
     # Total: 10 configs × 5 samples = 50 samples
@@ -131,9 +134,9 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     # ========================================================================
     
     print(f"✅ Generated {len(configs)} configs, 50 TOTAL SAMPLES")
-    print(f"   - 8 SATURATION configs (seeds: 42 → 7,777,777)")
-    print(f"   - 1 N-terminus probe (3K5V-targeting)")
-    print(f"   - 1 C-terminus probe (coverage)")
+    print(f"   - 8 SATURATION configs (seeds: 42 → 7,777,777, unconstrained)")
+    print(f"   - 1 N-terminus HARD probe (force=True, 3K5V-targeting)")
+    print(f"   - 1 C-terminus HARD probe (force=True, coverage)")
     return configs
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
@@ -254,14 +257,15 @@ def normalize_scores_fast(scores: list[dict]) -> list[dict]:
 
 def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
     """
-    SATURATION + Simple Scoring: The winning combination!
+    SATURATION + Confidence-Only Scoring
     
-    Key insight from testing:
-    - SATURATION works: 50 samples generate good predictions (6FVF: 15.68Å in Top-5)
-    - Multi-Scoring Ensemble FAILED: picked wrong Top-1 (6FVF: 19.61Å instead of 15.68Å)
-    - Solution: Keep saturation, use simple trusted scoring
+    Key insight from debugging 6FVF:
+    - All models have similar confidence (~97.5)
+    - All models have IDENTICAL clashes (2866)
+    - Normalization destroys the small confidence differences
+    - More contacts ≠ better (model_0 had most contacts but worst RMSD)
     
-    Strategy: Trust Boltz confidence, penalize clashes, reward contacts
+    Solution: Sort by raw Boltz confidence (trust the model's subtle preferences)
     """
     # Collect all PDBs from all configurations
     all_pdbs = []
@@ -273,26 +277,17 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No PDB files found for {datapoint.datapoint_id}")
         return []
     
-    print(f"🔥 SATURATION scoring: {len(all_pdbs)} predictions for {datapoint.datapoint_id}")
+    print(f"🔥 SATURATION + Confidence ranking: {len(all_pdbs)} predictions for {datapoint.datapoint_id}")
     
     scores = []
     for pdb_path in all_pdbs:
         try:
-            # 1. Parse PDB (Biopython)
-            structure = parse_pdb(pdb_path)
-            
-            # 2. Extract Boltz confidence
+            # Extract Boltz confidence (raw, no normalization)
             boltz_conf = extract_confidence(pdb_path)
-            
-            # 3. Compute physics-based metrics
-            clash_penalty = compute_clash_penalty_fast(structure)
-            contact_count = count_protein_ligand_contacts_fast(structure, cutoff=4.5)
             
             scores.append({
                 "path": pdb_path,
-                "boltz_conf": boltz_conf,
-                "clash": clash_penalty,
-                "contacts": contact_count,
+                "confidence": boltz_conf,
             })
         except Exception as e:
             print(f"Warning: Failed to score {pdb_path.name}: {e}")
@@ -302,25 +297,19 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No valid scores computed for {datapoint.datapoint_id}")
         return all_pdbs[:5]
     
-    # Normalize scores
-    scores = normalize_scores_fast(scores)
+    # Sort by raw confidence (highest first)
+    scores.sort(key=lambda x: x["confidence"], reverse=True)
     
-    # ========================================================================
-    # SIMPLE HYBRID SCORING (what worked before!)
-    # ========================================================================
-    for s in scores:
-        s["hybrid"] = (
-            0.65 * s["boltz_conf_norm"] +    # Trust the model (it knows best!)
-            -0.25 * s["clash_norm"] +         # Penalize bad geometry
-            0.10 * s["contacts_norm"]         # Reward binding interactions
-        )
+    # Print top 10 for debugging
+    print(f"\n🔍 TOP 10 BY CONFIDENCE:")
+    print(f"{'Rank':<5} {'Model':<35} {'Confidence':<12}")
+    print("-" * 55)
+    for i, s in enumerate(scores[:10], 1):
+        model_name = s["path"].name[-30:]  # Last 30 chars of filename
+        print(f"{i:<5} {model_name:<35} {s['confidence']:.4f}")
     
-    # Sort and return top-5
-    scores.sort(key=lambda x: x["hybrid"], reverse=True)
-    
-    print(f"✅ Top-1: confidence={scores[0]['boltz_conf']:.3f}, clashes={scores[0]['clash']:.1f}, contacts={scores[0]['contacts']}")
-    top5_confs = [f"{s['boltz_conf']:.2f}" for s in scores[:5]]
-    print(f"   Top-5 confidences: {top5_confs}")
+    print(f"\n✅ Selected Top-1: {scores[0]['path'].name}")
+    print(f"   Confidence: {scores[0]['confidence']:.4f}")
     
     return [s["path"] for s in scores[:5]]
 
