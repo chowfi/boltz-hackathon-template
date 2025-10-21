@@ -319,7 +319,8 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
     scores.sort(key=lambda x: x["hybrid"], reverse=True)
     
     print(f"✅ Top-1: confidence={scores[0]['boltz_conf']:.3f}, clashes={scores[0]['clash']:.1f}, contacts={scores[0]['contacts']}")
-    print(f"   Top-5 confidences: {[f\"{s['boltz_conf']:.2f}\" for s in scores[:5]]}")
+    top5_confs = [f"{s['boltz_conf']:.2f}" for s in scores[:5]]
+    print(f"   Top-5 confidences: {top5_confs}")
     
     return [s["path"] for s in scores[:5]]
 
