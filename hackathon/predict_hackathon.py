@@ -51,48 +51,89 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
 
 def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
-    SATURATION strategy: Generate massive diversity to find rare allosteric sites.
+    SATURATION + N-terminus Probing Strategy
     
-    Key insights:
-    - Hackathon hint: "Saturation" = generate MANY samples to saturate conformational space
-    - For hard allosteric cases: need 50+ samples to hit rare sites
-    - Full protein context is critical (no pocket scanning)
-    - Extreme seed spacing for orthogonal exploration
+    Key insights from testing:
+    - SATURATION works when diversity exists (6FVF: 15.68Å)
+    - SATURATION fails when Boltz is stuck in one region (3K5V: 25.5Å)
+    - 3K5V has N-terminus binding (seqid=1) which Boltz never explores
+    - Solution: Add explicit N-terminus/C-terminus probing configs
     
-    Strategy: 10 configs × 5 samples = 50 total samples
+    Strategy:
+    - 8 SATURATION configs (wide seed diversity)
+    - 1 N-terminus probing config (residues 1-20)
+    - 1 C-terminus probing config (last 20 residues)
+    Total: 10 configs × 5 samples = 50 total samples
     """
     configs = []
     
-    print(f"🔥 SATURATION strategy for {datapoint_id}")
+    print(f"🔥 SATURATION + Terminus Probing for {datapoint_id}")
+    
+    # Get ligand ID for constraints
+    ligand_id = ligands[0].id if ligands else "B"
+    protein_id = protein.id
+    protein_length = len(protein.sequence)
     
     # ========================================================================
-    # SATURATION: 10 configs with exponentially-spaced seeds
-    # From conservative (42) to ultra-extreme (7777777)
+    # Config 0-7: SATURATION with wide seed diversity
     # ========================================================================
-    
-    seeds = [
-        42,        # Conservative baseline
-        1000,      # Low diversity
-        5000,      # Medium diversity
-        10000,     # High diversity
-        25000,     # Very high diversity
-        50000,     # Extreme diversity
-        100000,    # Ultra diversity
-        500000,    # Maximum diversity
-        999999,    # Edge case exploration
-        7777777,   # Random large seed for orthogonal space
-    ]
+    seeds = [42, 1000, 5000, 10000, 50000, 100000, 500000, 7777777]
     
     for i, seed in enumerate(seeds):
         config_dict = input_dict.copy()
         configs.append((config_dict, ["--diffusion_samples", "5", "--seed", str(seed)]))
-        print(f"  Config {i}: seed={seed:>7} (5 samples)")
+        print(f"  Config {i}: Saturation seed={seed:>7} (5 samples)")
     
+    # ========================================================================
+    # Config 8: N-terminus Probing (residues 1-20)
+    # Targets hard cases like 3K5V where ligand binds at N-terminus
+    # ========================================================================
+    n_term_dict = input_dict.copy()
+    n_term_residues = list(range(1, min(21, protein_length + 1)))  # 1-indexed, residues 1-20
+    n_term_contacts = [[protein_id, res] for res in n_term_residues]
+    
+    n_term_dict["constraints"] = [{
+        "pocket": {
+            "binder": ligand_id,
+            "contacts": n_term_contacts,
+            "max_distance": 6.0,  # Standard pocket distance
+            "force": False  # Use as soft constraint (conditioning)
+        }
+    }]
+    
+    configs.append((n_term_dict, ["--diffusion_samples", "5", "--seed", "111111"]))
+    print(f"  Config {len(configs)-1}: N-terminus probe (residues 1-20, 5 samples)")
+    
+    # ========================================================================
+    # Config 9: C-terminus Probing (last 20 residues)
+    # Some allosteric sites are at C-terminus
+    # ========================================================================
+    c_term_dict = input_dict.copy()
+    c_term_start = max(1, protein_length - 19)  # Last 20 residues
+    c_term_residues = list(range(c_term_start, protein_length + 1))  # 1-indexed
+    c_term_contacts = [[protein_id, res] for res in c_term_residues]
+    
+    c_term_dict["constraints"] = [{
+        "pocket": {
+            "binder": ligand_id,
+            "contacts": c_term_contacts,
+            "max_distance": 6.0,
+            "force": False
+        }
+    }]
+    
+    configs.append((c_term_dict, ["--diffusion_samples", "5", "--seed", "222222"]))
+    print(f"  Config {len(configs)-1}: C-terminus probe (residues {c_term_start}-{protein_length}, 5 samples)")
+    
+    # ========================================================================
     # Total: 10 configs × 5 samples = 50 samples
-    # 2.5x more samples than before → better chance of hitting rare sites!
+    # 8 unconstrained + 2 terminus-focused
+    # ========================================================================
     
-    print(f"✅ Generated {len(configs)} configs, 50 TOTAL SAMPLES (SATURATION)")
-    print(f"📊 Seed range: 42 → 7,777,777 (extreme diversity)")
+    print(f"✅ Generated {len(configs)} configs, 50 TOTAL SAMPLES")
+    print(f"   - 8 SATURATION configs (seeds: 42 → 7,777,777)")
+    print(f"   - 1 N-terminus probe (3K5V-targeting)")
+    print(f"   - 1 C-terminus probe (coverage)")
     return configs
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
@@ -213,14 +254,14 @@ def normalize_scores_fast(scores: list[dict]) -> list[dict]:
 
 def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
     """
-    Multi-Scoring Ensemble for robust Top-1 selection.
+    SATURATION + Simple Scoring: The winning combination!
     
-    Strategy:
-    1. Generate 3 different scoring schemes (orthosteric, allosteric, balanced)
-    2. Use ensemble voting to pick the best Top-1
-    3. Diversify Top-5 with best from each scheme
+    Key insight from testing:
+    - SATURATION works: 50 samples generate good predictions (6FVF: 15.68Å in Top-5)
+    - Multi-Scoring Ensemble FAILED: picked wrong Top-1 (6FVF: 19.61Å instead of 15.68Å)
+    - Solution: Keep saturation, use simple trusted scoring
     
-    Critical for Top-1 RMSD metric!
+    Strategy: Trust Boltz confidence, penalize clashes, reward contacts
     """
     # Collect all PDBs from all configurations
     all_pdbs = []
@@ -232,7 +273,7 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         print(f"Warning: No PDB files found for {datapoint.datapoint_id}")
         return []
     
-    print(f"🎯 Multi-Scoring Ensemble: scoring {len(all_pdbs)} predictions for {datapoint.datapoint_id}")
+    print(f"🔥 SATURATION scoring: {len(all_pdbs)} predictions for {datapoint.datapoint_id}")
     
     scores = []
     for pdb_path in all_pdbs:
@@ -265,89 +306,22 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
     scores = normalize_scores_fast(scores)
     
     # ========================================================================
-    # MULTI-SCORING ENSEMBLE: 3 Different Schemes
+    # SIMPLE HYBRID SCORING (what worked before!)
     # ========================================================================
-    
-    # Scheme 1: ORTHOSTERIC-optimized (trust Boltz heavily)
     for s in scores:
-        s["score_orthosteric"] = (
-            0.80 * s["boltz_conf_norm"] +    # High trust in model (trained on orthosteric)
-            -0.15 * s["clash_norm"] +         # Moderate penalty for clashes
-            0.05 * s["contacts_norm"]         # Low weight on contacts
+        s["hybrid"] = (
+            0.65 * s["boltz_conf_norm"] +    # Trust the model (it knows best!)
+            -0.25 * s["clash_norm"] +         # Penalize bad geometry
+            0.10 * s["contacts_norm"]         # Reward binding interactions
         )
     
-    # Scheme 2: ALLOSTERIC-optimized (trust physics over model)
-    for s in scores:
-        s["score_allosteric"] = (
-            0.30 * s["boltz_conf_norm"] +    # LOW trust in model (allosteric is hard)
-            -0.40 * s["clash_norm"] +         # HIGH penalty for clashes (must be good)
-            0.30 * s["contacts_norm"]         # HIGH weight on contacts (binding is key)
-        )
+    # Sort and return top-5
+    scores.sort(key=lambda x: x["hybrid"], reverse=True)
     
-    # Scheme 3: BALANCED (hybrid approach)
-    for s in scores:
-        s["score_balanced"] = (
-            0.60 * s["boltz_conf_norm"] +
-            -0.25 * s["clash_norm"] +
-            0.15 * s["contacts_norm"]
-        )
+    print(f"✅ Top-1: confidence={scores[0]['boltz_conf']:.3f}, clashes={scores[0]['clash']:.1f}, contacts={scores[0]['contacts']}")
+    print(f"   Top-5 confidences: {[f\"{s['boltz_conf']:.2f}\" for s in scores[:5]]}")
     
-    # ========================================================================
-    # ENSEMBLE VOTING: Pick Top-1 based on consensus
-    # ========================================================================
-    
-    # Get top-1 from each scheme
-    top1_orthosteric = max(scores, key=lambda x: x["score_orthosteric"])
-    top1_allosteric = max(scores, key=lambda x: x["score_allosteric"])
-    top1_balanced = max(scores, key=lambda x: x["score_balanced"])
-    
-    candidates = [top1_orthosteric, top1_allosteric, top1_balanced]
-    candidate_paths = [c["path"] for c in candidates]
-    
-    # Check for consensus
-    if len(set(candidate_paths)) == 1:
-        # All 3 agree → high confidence
-        print("✅ All scoring schemes AGREE → high confidence prediction")
-        final_top1 = top1_balanced
-    elif candidate_paths[0] == candidate_paths[2]:  # orthosteric == balanced
-        print("✅ Orthosteric + Balanced agree → likely ORTHOSTERIC site")
-        final_top1 = top1_orthosteric
-    elif candidate_paths[1] == candidate_paths[2]:  # allosteric == balanced
-        print("✅ Allosteric + Balanced agree → likely ALLOSTERIC site")
-        final_top1 = top1_allosteric
-    else:
-        # All 3 disagree → use meta-ensemble
-        print("⚠️  Scoring schemes DISAGREE → using meta-ensemble")
-        for s in scores:
-            s["meta_score"] = (
-                0.33 * s["score_orthosteric"] +
-                0.33 * s["score_allosteric"] +
-                0.34 * s["score_balanced"]
-            )
-        final_top1 = max(scores, key=lambda x: x["meta_score"])
-    
-    # ========================================================================
-    # BUILD DIVERSIFIED TOP-5
-    # ========================================================================
-    
-    # Top-1: The ensemble winner
-    ranked_paths = [final_top1["path"]]
-    
-    # Add best from each scheme (for diversity)
-    for candidate in [top1_orthosteric, top1_allosteric, top1_balanced]:
-        if candidate["path"] not in ranked_paths:
-            ranked_paths.append(candidate["path"])
-    
-    # Fill remaining slots with balanced scoring
-    scores_sorted = sorted(scores, key=lambda x: x["score_balanced"], reverse=True)
-    for s in scores_sorted:
-        if s["path"] not in ranked_paths and len(ranked_paths) < 5:
-            ranked_paths.append(s["path"])
-    
-    print(f"🏆 Final Top-1: {final_top1['path'].name}")
-    print(f"   Confidence: {final_top1['boltz_conf']:.3f}, Clashes: {final_top1['clash']:.1f}, Contacts: {final_top1['contacts']}")
-    
-    return ranked_paths[:5]
+    return [s["path"] for s in scores[:5]]
 
 
 # -----------------------------------------------------------------------------
