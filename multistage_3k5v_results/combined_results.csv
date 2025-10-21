@@ -1,2 +1,0 @@
-datapoint_id,type,top1_rmsd,top5_mean_rmsd,top5_min_rmsd,rmsd_under_2A,rmsd_model_0,rmsd_model_1,rmsd_model_2,rmsd_model_3,rmsd_model_4
-3K5V_ALLOSTERIC_STJ,allosteric,33.072255093492586,28.465576042514225,25.03929146861939,False,33.072255093492586,33.42695266538362,25.03929146861939,25.60258696112662,25.18679402394895
