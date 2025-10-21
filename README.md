@@ -1,4 +1,4 @@
-# Final Strategy: SATURATION + Confidence-Only
+# Final Strategy: Saturation + Confidence-Only
 
 ## Overview
 
